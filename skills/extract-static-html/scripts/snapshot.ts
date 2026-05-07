@@ -316,6 +316,11 @@ async function snapshot(opts: Opts): Promise<void> {
       console.log(`🎨 Adding class "${opts.htmlClass}" to <html>...`);
       await page.evaluate((cls: string) => {
         document.documentElement.classList.add(...cls.split(/\s+/));
+        if (cls.includes('dark')) {
+          document.documentElement.setAttribute('data-theme', 'dark');
+        } else if (cls.includes('light')) {
+          document.documentElement.setAttribute('data-theme', 'light');
+        }
       }, opts.htmlClass);
       await new Promise((r) => setTimeout(r, 500));
     }
@@ -352,15 +357,7 @@ async function snapshot(opts: Opts): Promise<void> {
       }, opts.removeSelectors);
     }
 
-    // Resize viewport to full scroll height
-    if (opts.fullHeight) {
-      const scrollHeight = await page.evaluate(
-        () => document.documentElement.scrollHeight,
-      );
-      console.log(`📐 Resizing viewport to full height: ${scrollHeight}px`);
-      await page.setViewport({ width, height: scrollHeight });
-      await new Promise((r) => setTimeout(r, 500));
-    }
+
 
     // Override title
     if (opts.title) {
@@ -540,6 +537,208 @@ async function snapshot(opts: Opts): Promise<void> {
         },
       };
     }, opts.concurrency);
+
+    // -----------------------------------------------------------------------
+    // -1. Inline local iframes (e.g., companion-app test iframe)
+    // -----------------------------------------------------------------------
+    const iframesCount = await page.evaluate(() => document.querySelectorAll('iframe').length);
+    if (iframesCount > 0) {
+      console.log(`🔍 Found ${iframesCount} iframe(s) in the main page. Extracting content natively...`);
+
+      // First, recursively inline all same-origin and srcDoc iframes browser-side
+      console.log('🔍 Inlining same-origin and srcDoc iframes recursively...');
+      await page.evaluate(() => {
+        const inlineSameOriginIframes = (root: Document | HTMLElement) => {
+          const iframes = Array.from(root.querySelectorAll('iframe'));
+          for (const iframe of iframes) {
+            try {
+              const doc = iframe.contentDocument || iframe.contentWindow?.document;
+              if (doc && doc.body) {
+                // Recursively inline same-origin iframes inside this child frame first
+                inlineSameOriginIframes(doc);
+
+                const bodyHtml = doc.body.innerHTML;
+
+                const styles: string[] = [];
+                doc.querySelectorAll('style').forEach(s => styles.push(s.outerHTML));
+                doc.querySelectorAll('link[rel="stylesheet"]').forEach(l => styles.push((l as HTMLLinkElement).outerHTML));
+
+                styles.forEach(styleHtml => {
+                  const temp = document.createElement('div');
+                  temp.innerHTML = styleHtml;
+                  document.head.appendChild(temp.firstChild!);
+                });
+
+                const wrapper = document.createElement('div');
+                wrapper.className = 'ac-iframe-inlined-wrapper';
+                wrapper.style.position = 'absolute';
+                wrapper.style.top = '0';
+                wrapper.style.left = '0';
+                wrapper.style.width = '100%';
+                wrapper.style.height = '100%';
+                wrapper.style.overflow = 'hidden';
+                wrapper.innerHTML = bodyHtml;
+
+                iframe.parentNode!.replaceChild(wrapper, iframe);
+              }
+            } catch (e) {
+              // Ignore cross-origin iframes; the Puppeteer frame loop will process them
+            }
+          }
+        };
+        inlineSameOriginIframes(document);
+      });
+
+      const childFrames = page.frames()
+        .filter(f => f !== page.mainFrame())
+        .map(f => {
+          let depth = 0;
+          let p = f.parentFrame();
+          while (p) {
+            depth++;
+            p = p.parentFrame();
+          }
+          return { frame: f, depth };
+        })
+        .sort((a, b) => b.depth - a.depth);
+
+      for (const { frame } of childFrames) {
+        try {
+          const frameUrl = frame.url();
+          const cleanUrl = frameUrl.split('?')[0].split('#')[0];
+          console.log(`📦 Extracting frame content from: ${cleanUrl} (depth: ${frame.parentFrame() ? 'nested' : 'root'})`);
+
+          // Inject __name mock to prevent esbuild helper ReferenceError in child frame
+          await frame.evaluate(() => {
+            (window as any).__name = (fn: any) => fn;
+          });
+
+          // Resolve all relative assets inside the frame to absolute URLs relative to the frame's URL
+          await frame.evaluate((base) => {
+            const resolveAttr = (el: Element, attr: string) => {
+              const val = el.getAttribute(attr);
+              if (val && !val.startsWith('data:') && !val.startsWith('http:') && !val.startsWith('https:') && !val.startsWith('//')) {
+                try {
+                  const abs = new URL(val, base).href;
+                  el.setAttribute(attr, abs);
+                } catch (e) { }
+              }
+            };
+            document.querySelectorAll('img[src]').forEach(img => resolveAttr(img, 'src'));
+            document.querySelectorAll('img[srcset]').forEach(img => resolveAttr(img, 'srcset'));
+            document.querySelectorAll('source[srcset]').forEach(src => resolveAttr(src, 'srcset'));
+            document.querySelectorAll('link[rel="stylesheet"]').forEach(link => resolveAttr(link, 'href'));
+          }, frameUrl);
+
+          const frameStyles = await frame.evaluate(() => {
+            const stylesList: string[] = [];
+            document.querySelectorAll('style').forEach(s => stylesList.push(s.outerHTML));
+            document.querySelectorAll('link[rel="stylesheet"]').forEach(l => stylesList.push((l as HTMLLinkElement).outerHTML));
+            return stylesList;
+          });
+
+          const frameBodyHtml = await frame.evaluate(() => document.body.innerHTML);
+
+          const parent = frame.parentFrame();
+          if (parent) {
+            await parent.evaluate((url, bodyHtml, styles) => {
+              styles.forEach(styleHtml => {
+                const temp = document.createElement('div');
+                temp.innerHTML = styleHtml;
+                document.head.appendChild(temp.firstChild!);
+              });
+
+              const iframes = Array.from(document.querySelectorAll('iframe'));
+              for (const iframe of iframes) {
+                const cleanIframeSrc = iframe.src.split('?')[0].split('#')[0];
+                if (cleanIframeSrc && (url.includes(cleanIframeSrc) || cleanIframeSrc.includes(url))) {
+                  const wrapper = document.createElement('div');
+                  wrapper.className = 'ac-iframe-inlined-wrapper';
+                  wrapper.style.position = 'absolute';
+                  wrapper.style.top = '0';
+                  wrapper.style.left = '0';
+                  wrapper.style.width = '100%';
+                  wrapper.style.height = '100%';
+                  wrapper.style.overflow = 'hidden';
+                  wrapper.innerHTML = bodyHtml;
+                  iframe.parentNode!.replaceChild(wrapper, iframe);
+                  break;
+                }
+              }
+            }, cleanUrl, frameBodyHtml, frameStyles);
+          }
+
+        } catch (frameErr) {
+          console.warn('Failed to extract child frame content:', frameErr);
+        }
+      }
+    }
+
+    // Resize viewport to full scroll height (executed after iframe contents are natively merged)
+    if (opts.fullHeight) {
+      console.log('📐 Scanning DOM for maximum scrollable container height...');
+
+      const maxScrollHeight = await page.evaluate(() => {
+        let maxVal = document.documentElement.scrollHeight;
+        const all = document.querySelectorAll('*');
+        for (const el of all) {
+          const style = getComputedStyle(el);
+          if (style.overflow === 'auto' || style.overflowY === 'auto' || style.overflow === 'scroll' || style.overflowY === 'scroll') {
+            if (el.scrollHeight > maxVal) {
+              maxVal = el.scrollHeight;
+            }
+          }
+        }
+        return maxVal;
+      });
+
+      // Resize viewport to the true maximum scroll height (plus 120px buffer for safety)
+      const finalViewportHeight = maxScrollHeight + 120;
+      console.log(`📐 Resizing viewport to maximum content height: ${finalViewportHeight}px`);
+      await page.setViewport({ width, height: finalViewportHeight });
+
+      // Force layout wrappers and scrollable containers to unlock their heights
+      await page.evaluate(() => {
+        document.documentElement.style.setProperty('height', 'auto', 'important');
+        document.documentElement.style.setProperty('overflow', 'visible', 'important');
+        document.body.style.setProperty('height', 'auto', 'important');
+        document.body.style.setProperty('overflow', 'visible', 'important');
+
+        const elements = document.querySelectorAll('*');
+        for (const el of elements) {
+          const style = getComputedStyle(el);
+          const hasViewportHeight = style.height.includes('vh') ||
+            style.height.includes('svh') ||
+            style.height === '100%' ||
+            style.height === '100vh' ||
+            style.height === '100svh' ||
+            style.maxHeight.includes('vh') ||
+            style.maxHeight.includes('svh') ||
+            style.maxHeight === '100%' ||
+            el.classList.contains('h-svh') ||
+            el.classList.contains('h-screen') ||
+            el.classList.contains('ac-iframe-inlined-wrapper') ||
+            el.classList.contains('ac-iframe');
+
+          if (hasViewportHeight) {
+            (el as HTMLElement).style.setProperty('height', 'auto', 'important');
+            (el as HTMLElement).style.setProperty('min-height', '0', 'important');
+            (el as HTMLElement).style.setProperty('max-height', 'none', 'important');
+          }
+
+          if (style.overflow === 'auto' || style.overflowY === 'auto' || style.overflow === 'scroll' || style.overflowY === 'scroll') {
+            (el as HTMLElement).style.setProperty('height', 'auto', 'important');
+            (el as HTMLElement).style.setProperty('max-height', 'none', 'important');
+            (el as HTMLElement).style.setProperty('overflow', 'visible', 'important');
+            (el as HTMLElement).style.setProperty('position', 'relative', 'important');
+          }
+        }
+      });
+
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+
+
 
     // -----------------------------------------------------------------------
     // 0. Materialize CSS-in-JS styles into DOM
