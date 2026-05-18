@@ -423,36 +423,33 @@ function main(): void {
   }
 
   for (const file of opts.files) {
-    // Use fd-based read to eliminate TOCTOU race between existence check and read
+    // Open file once with r+ to eliminate TOCTOU race between read and write.
+    // A single fd is used for both operations, so the file cannot be swapped
+    // between the read and write phases.
     let fd: number;
-    let html: string;
     try {
-      fd = fs.openSync(file, 'r');
+      fd = fs.openSync(file, opts.dryRun ? 'r' : 'r+');
     } catch {
       console.warn(`⚠️  File not found, skipping: ${file}`);
       continue;
     }
+
+    let processed: string = '';
+    let stats: InlineStats = { srcInlined: 0, urlInlined: 0, skippedTooLarge: [], skippedNotFound: [] };
     try {
-      html = fs.readFileSync(fd, 'utf-8');
+      const html = fs.readFileSync(fd, 'utf-8');
+
+      const result = inlineImages(html, opts.baseDir, opts.maxSize, opts.dryRun);
+      processed = result.html;
+      stats = result.stats;
+
+      if (!opts.dryRun) {
+        // Truncate and rewrite using the same fd — no second path-based open
+        fs.ftruncateSync(fd);
+        fs.writeSync(fd, processed, 0, 'utf-8');
+      }
     } finally {
       fs.closeSync(fd);
-    }
-
-    const { html: processed, stats } = inlineImages(
-      html,
-      opts.baseDir,
-      opts.maxSize,
-      opts.dryRun,
-    );
-
-    if (!opts.dryRun) {
-      // Use fd-based write to eliminate TOCTOU race with the earlier read
-      const wfd = fs.openSync(file, 'w');
-      try {
-        fs.writeFileSync(wfd, processed, 'utf-8');
-      } finally {
-        fs.closeSync(wfd);
-      }
     }
 
     const totalInlined = stats.srcInlined + stats.urlInlined;
