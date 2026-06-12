@@ -1,0 +1,33 @@
+{
+  "name": "stitch-skills",
+  "owner": {
+    "name": "Agence-Ornevo"
+  },
+  "description": "Fork of stitch-skills \u2014 React Native component skills, Stitch design/build tools, and validation scripts.",
+  "plugins": [
+    {
+      "name": "stitch-build",
+      "displayName": "Stitch Build",
+      "source": "./plugins/stitch-build",
+      "description": "React component generation, Remotion walkthrough videos, and shadcn/ui integration."
+    },
+    {
+      "name": "stitch-design",
+      "displayName": "Stitch Design",
+      "source": "./plugins/stitch-design",
+      "description": "Code-to-design conversion, design system extraction, static HTML extraction, Stitch design generation, and design system management."
+    },
+    {
+      "name": "stitch-utilities",
+      "displayName": "Stitch Utilities",
+      "source": "./plugins/stitch-utilities",
+      "description": "Prompt enhancement, iterative build loop (stitch-loop), and semantic design taste."
+    },
+    {
+      "name": "react-native",
+      "displayName": "React Native",
+      "source": "./skills/react-native",
+      "description": "Convert Stitch HTML designs to React Native components with StyleSheet."
+    }
+  ]
+}
