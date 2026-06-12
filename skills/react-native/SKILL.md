@@ -1,12 +1,14 @@
 ---
 name: stitch::react-native
-description: Convert Stitch HTML designs to React Native components with StyleSheet
-allowed-tools:
+description: Convert Stitch HTML designs to React Native components with StyleSheet — fetch designs, validate components.
   - "stitch*:*"
   - "Bash"
   - "Read"
   - "Write"
   - "web_fetch"
+command: stitch-react-native
+entry: scripts/stitch_react_native_main.py
+args_hint: "[fetch|validate|help] <url>"
 ---
 
 # Stitch to React Native Components
